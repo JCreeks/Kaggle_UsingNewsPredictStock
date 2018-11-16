@@ -3,28 +3,13 @@
 
 # # Amateur Hour - Using Headlines to Predict Stocks
 # ### Starter Kernel by ``Magichanics`` 
-# *([Gitlab](https://gitlab.com/Magichanics) - [Kaggle](https://www.kaggle.com/magichanics))*
+# *([GitHub](https://github.com/Magichanics) - [Kaggle](https://www.kaggle.com/magichanics))*
 # 
-# Stocks are unpredictable, but can sometimes follow a trend. In this notebook, we will be discovering the correlation between the stocks and the news. After a few tries, my best score not including this one is ``0.54194`` from [V29](https://www.kaggle.com/magichanics/amateur-hour-using-headlines-to-predict-stocks/code?scriptVersionId=6466412). Right now, I'm trying to find answers as to why my score keeps fluctuating from ``-0.26`` to ``0.55``. 
-# 
-# We also have to keep in mind that these results may dramatically change when it comes to testing the kernel on the private dataset. 
+# Stocks are unpredictable, but can sometimes follow a trend. In this notebook, we will be discovering the correlation between the stocks and the news. After a few tries, my best score not including this one is ``0.54194`` from [V29](https://www.kaggle.com/magichanics/amateur-hour-using-headlines-to-predict-stocks/code?scriptVersionId=6466412). Right now, I'm trying to find answers as to why my score keeps fluctuating from ``-0.26`` to ``0.55``.  A lot of the scrapped code that I was going to use can be found on my GitLab account. Since the data provided for both the final submissions and training/test, we will be accounting for no new ``subjects``, ``assetCode``, ``assetName`` and ``audiences``.
 # 
 # If there are any things that you would like me to add or remove, feel free to comment down below. I'm mainly doing this to learn and experiment with the data. I plan on rewriting a lot of code in the future to make it look nicer, since a lot of the stuff I have written may not be the most efficient way to approach specific problems.
 # 
-# **To Do List:**
-# * Removing features with low importance?
-# * Add more data
-#     * i.e. grouping data possibly based on a moving time window.
-# * [Shifting time](https://www.kaggle.com/c/two-sigma-financial-news/discussion/69235)
-# * Use Neural Network due to the large data.
-# 
-# **Table of Contents (WIP): **
-# 1. Feature Engineering
-#     * Market Dataframe Features
-#     * Merging Dataframe
-#     * Headline Coefficients
-#     * Clustering Columns
-# 2. Modelling using LGBM
+# Also, thanks for the upvotes! I'll be making another kernel for this competition later on.
 # 
 # 
 
@@ -40,6 +25,9 @@ import pandas as pd
 import os
 from itertools import chain
 import gc
+
+import warnings
+warnings.filterwarnings('ignore')
 
 # text processing
 import re
@@ -61,6 +49,8 @@ import datetime
 from sklearn.model_selection import train_test_split
 import lightgbm as lgb
 
+# neural networks
+
 # import environment for data
 from kaggle.competitions import twosigmanews
 env = twosigmanews.make_env()
@@ -77,10 +67,10 @@ sampling = False
 
 # its best to get the data by its tail
 if sampling:
-    market_train_df = market_train_df.tail(40_000) # 40k to 100k
-    news_train_df = news_train_df.tail(100_000)
+    market_train_df = market_train_df.tail(400_000)
+    news_train_df = news_train_df.tail(1_000_000)
 else:
-    market_train_df = market_train_df.tail(3_000_000)
+    market_train_df = market_train_df.tail(3_000_000) # 3m to 6m was too much?
     news_train_df = news_train_df.tail(6_000_000)
 
 
@@ -99,6 +89,38 @@ news_train_df.head()
 # * ``Volume`` has the highest correlation in terms of ``returnsOpenNextMktres10``.
 # * Merging by just ``assetCodes`` greatly increases the dataframe (with just 100k rows, it has turned into 10 million rows), although merging by ``assetCodes`` and ``time`` greatly decrease the original dataframe.
 
+# ### Getting rid of "Fake" News
+# There are some things to notice about the news:
+# * Some headlines' length have a value of 0. (roughly 300-500 rows?)
+# * One Day delayed news (calculated by difference between ``sourceTimestamp`` and ``time``
+
+# In[ ]:
+
+def clean_news(news_df):
+    
+    # get rid of blank headlines
+    news_df = news_df[news_df.headline != '']
+    
+    # get rid of delayed news
+    news_df['news_delay'] = news_df['time'] - news_df['sourceTimestamp']
+    news_df = news_df[news_df.news_delay < datetime.timedelta(days=1)]
+    
+    # get rid of headline articles with only 1 takeSequence (experimental)
+#     news_df = news_df[(news_df.takeSequence != 1) | (news_df.urgency == 1)]
+    
+    return news_df
+
+
+# In[ ]:
+
+news_train_df = clean_news(news_train_df)
+
+
+# In[ ]:
+
+news_train_df.shape
+
+
 # ### Market Groupby Features
 # We are going to group market data based on ``assetName`` and determine the median and mean of the volume.
 
@@ -107,12 +129,13 @@ news_train_df.head()
 def mean_volume(market_df):
     
     # groupby and return median
-    vol_by_name = market_df[['volume', 'assetName']].groupby('assetName').median()['volume']
-    #vol_by_name_mean = market_df[['volume', 'assetName']].groupby('assetName').mean()['volume'] # could try mean?
-    market_df['vol_by_name'] = market_df['assetName'].map(vol_by_name)
+    vol_by_name_median = market_df[['volume', 'assetName']].groupby('assetName').median()['volume']
+    vol_by_name_mean = market_df[['volume', 'assetName']].groupby('assetName').mean()['volume'] # could try mean?
+    market_df['vol_by_name_median'] = market_df['assetName'].map(vol_by_name_median)
+    market_df['vol_by_name_mean'] = market_df['assetName'].map(vol_by_name_mean)
     
-    # get difference
-    market_df['vol_by_name_diff'] = market_df['volume'] - market_df['vol_by_name']
+    # get difference for median
+    market_df['vol_by_name_median_diff'] = market_df['volume'] - market_df['vol_by_name_median']
     
     return market_df
 
@@ -120,6 +143,62 @@ def mean_volume(market_df):
 # In[ ]:
 
 market_train_df = mean_volume(market_train_df)
+
+
+# ### [Simple Quant Features](https://www.kaggle.com/youhanlee/simple-quant-features-using-python)
+# Please go check out YouHan Lee's notebook on Simple Quant Features!
+# 
+# In addition to this, there could be a chance that stocks that aren't associated with any sort of news to change in direction with a low standard deviation within a very small time window.
+
+# In[ ]:
+
+def market_quant_feats(market_df):
+    
+    # get moving average
+    def moving_avg(X, feat1):
+        X[feat1 + '_MA_7MA'] = X[feat1].rolling(window=7).mean()
+        X[feat1 + '_MA_15MA'] = X[feat1].rolling(window=15).mean()
+        X[feat1 + '_MA_30MA'] = X[feat1].rolling(window=30).mean()
+        X[feat1 + '_MA_60MA'] = X[feat1].rolling(window=60).mean()
+        return X
+        
+    # get moving standard deviation
+    def moving_std(X, feat1):
+        X[feat1 + '_MA_1std'] = X[feat1].rolling(window=1).std()
+        X[feat1 + '_MA_3std'] = X[feat1].rolling(window=3).std()
+        X[feat1 + '_MA_5std'] = X[feat1].rolling(window=5).std()
+        return X
+        
+    market_df = moving_avg(market_df, 'close')
+    market_df = moving_avg(market_df, 'volume')
+    market_df = moving_std(market_df, 'volume')
+    
+    # bollinger band
+    no_of_std = 2
+    market_df['MA_7MA'] = market_df['close'].rolling(window=7).mean()
+    market_df['MA_7MA_std'] = market_df['close'].rolling(window=7).std() 
+    market_df['MA_7MA_BB_high'] = market_df['MA_7MA'] + no_of_std * market_df['MA_7MA_std']
+    market_df['MA_7MA_BB_low'] = market_df['MA_7MA'] - no_of_std * market_df['MA_7MA_std']
+    market_df['MA_15MA'] = market_df['close'].rolling(window=15).mean()
+    market_df['MA_15MA_std'] = market_df['close'].rolling(window=15).std() 
+    market_df['MA_15MA_BB_high'] = market_df['MA_15MA'] + no_of_std * market_df['MA_15MA_std']
+    market_df['MA_15MA_BB_low'] = market_df['MA_15MA'] - no_of_std * market_df['MA_15MA_std']
+    market_df['MA_30MA'] = market_df['close'].rolling(window=30).mean()
+    market_df['MA_30MA_std'] = market_df['close'].rolling(window=30).std() 
+    market_df['MA_30MA_BB_high'] = market_df['MA_30MA'] + no_of_std * market_df['MA_30MA_std']
+    market_df['MA_30MA_BB_low'] = market_df['MA_30MA'] - no_of_std * market_df['MA_30MA_std']
+    
+    # Adding daily difference
+    new_col = market_df["close"] - market_df["open"]
+    market_df.insert(loc=6, column="daily_diff", value=new_col)
+    market_df['close_to_open'] =  np.abs(market_df['close'] / market_df['open'])
+    
+    return market_df
+
+
+# In[ ]:
+
+market_train_df = market_quant_feats(market_train_df)
 
 
 # ### Aggregations on News Data
@@ -149,12 +228,13 @@ news_agg_dict['takeSequence'] = ['max']
 # Notes: 
 # * When you run the full dataset, expect it to take a while.
 # * As you remove more time features from seconds to year, the resulting train data becomes larger and larger.
+# * Add Three Day Moving Period, i.e. combine all data that happened between 3 days before the market time to the market time.
 
 # In[ ]:
 
 def generalize_time(X):
     # convert time to string and/or get rid of Hours, Minutes, and seconds
-    X['time'] = X['time'].dt.strftime('%Y-%m-%d %H:%M:%S').str.slice(0,16) #(0,10) for Y-m-d, (0,13) for Y-m-d H
+    X['time'] = X['time'].dt.strftime('%Y-%m-%d %H:%M:%S').str.slice(0,19) #(0,10) for Y-m-d, (0,13) for Y-m-d H
     # do not use (0,10) or (0, 13) on the whole dataset
     
 # get dataframes within indecies
@@ -188,7 +268,7 @@ def add_null_indecies(indecies, valid_indecies, num_nulls):
         return
     
     # loop to get any nulls that are not present in the index
-    while curr_nulls < num_nulls or iteration >= len(indecies):
+    while curr_nulls < num_nulls and iteration < len(indecies):
         if indecies[iteration] not in valid_indecies: # filling in missing values i.e. [3, (4), (5), 6, 7...]
             null_indecies.append(indecies[iteration]) # you could try fitting it between the adjacent values?
             curr_nulls += 1
@@ -266,10 +346,12 @@ def join_market_news(market_df, news_df, nulls=False, num_nulls=0):
     # check if the columns are in the index
     if not nulls:
         news_df_expanded = get_indecies(news_df_expanded, news_valid_indecies)
-
+    
     def news_df_feats(x):
+        
         if x.name == 'headline':
             return list(x)
+        
         elif x.name == 'subjects' or x.name == 'audiences':
             output = []
             for i in x:
@@ -277,6 +359,7 @@ def join_market_news(market_df, news_df, nulls=False, num_nulls=0):
                 codes = i.strip('{\',}').replace('\'','').split(', ')
                 for j in codes:
                     output.append(j)
+                            
             return output
     
     # groupby time and assetcode
@@ -292,6 +375,18 @@ def join_market_news(market_df, news_df, nulls=False, num_nulls=0):
     news_df_cat = pd.DataFrame({'headline':groupby_news['headline'],
                                'subjects':groupby_news['subjects'],
                                'audiences':groupby_news['audiences']})
+    
+    # apply countvectorizer to get features of subject and audience (commented this out for V59)
+    vectorizer = CountVectorizer(tokenizer=lambda doc: doc, lowercase=False)
+    for f in ['audiences', 'subjects']:
+        X_codes = vectorizer.fit_transform(news_df_cat[f].tolist())
+        col_names = vectorizer.get_feature_names()
+        X_codes = pd.DataFrame(X_codes.toarray())
+        X_codes.columns = col_names
+        news_df_cat = pd.concat([news_df_cat, X_codes], axis=1)
+        del news_df_cat[f]
+        
+    # merge
     new_news_df = pd.concat([news_df_aggregated, news_df_cat], axis=1)
     
     # cleanup
@@ -309,7 +404,7 @@ def join_market_news(market_df, news_df, nulls=False, num_nulls=0):
         market_df = pd.concat([market_df, market_df_nulls], sort=False)
     
     # replace with null string
-    market_df[['audiences', 'subjects', 'headline']] = market_df[['audiences', 'subjects', 'headline']].fillna('null')
+    market_df['headline'] = market_df['headline'].fillna('null')
 
     return market_df
 
@@ -319,7 +414,7 @@ def join_market_news(market_df, news_df, nulls=False, num_nulls=0):
 
 # In[ ]:
 
-get_ipython().run_cell_magic(u'time', u'', u'X_train = join_market_news(market_train_df, news_train_df, nulls=False, num_nulls=10_000)')
+get_ipython().run_cell_magic(u'time', u'', u'X_train = join_market_news(market_train_df, news_train_df, nulls=False, num_nulls=500_000)')
 
 
 # In[ ]:
@@ -336,9 +431,18 @@ X_train.shape
 # 
 # We are going to vectorize the headlines and apply logistic regression (labels being binary as to whether the stocks go up or not). In a nutshell, it splits the headlines into individual words, filters out unecessary words to prevent abnormal results, vectorizes it for modelling, and then with the target column provided, we could create a dataframe of coefficients that we could use as a feature in the dataframe! Right now I am just getting the mean of the coefficients in each list of headlines. 
 # 
-# Note: May be useful to apply it to ``universe``, and possibly get the sum or standard deviation of the word coefficients?
+# Note: 
+# * May be useful to apply it to ``universe``, and possibly get the sum or standard deviation of the word coefficients?
+# * Some key words that should appear in bottom/top?
+#     * Free Trade Agreement
+#     * Interest Rates
+#     * Contracts
+#     
+# Update: We are now going to apply the same code on both ``audiences`` and ``subjects``
 
 # In[ ]:
+
+ps = PorterStemmer()
 
 # reuse data
 def round_scores(x):
@@ -346,39 +450,39 @@ def round_scores(x):
         return 1
     else:
         return 0
-    
+
+# this takes up a lot of time, so apply it when getting coefficients to filter out words.
 def clean_headlines(headline):
     
     # remove numerical and convert to lowercase
     headline =  re.sub('[^a-zA-Z]',' ',headline)
     headline = headline.lower()
     
-    # drop stopwords
-    headline_words = headline.split(' ')
-    headline_words = [word for word in headline_words if not word in stopwords.words('english')]
-    
     # use stemming to simplify words
-    ps = PorterStemmer()
-    headline_words = [ps.stem(word) for word in headline_words]
+    headline_words = [ps.stem(word) for word in headline.split(' ')]
     
     # join sentence back again
     return ' '.join(headline_words)
 
 # these functions should only go towards the training data only
-def get_headline_df(X_train):
+def get_headline_df(X_train, col='headline'):
+    
+    # make sure this is a copy of the given dataframe
+    # remove any headlines with nulls
+    X_train = X_train[X_train[col] != 'null']
     
     headlines_lst = []
     target_lst = []
     
     # iter through every headline.
     for row in range(0,len(X_train.index)):
-        if X_train['headline'].iloc[row] != 'null':
-            for sentence in X_train['headline'].iloc[row]:
-                headlines_lst.append(clean_headlines(sentence))
+        if X_train[col].iloc[row] != 'null':
+            for sentence in X_train[col].iloc[row]:
+                headlines_lst.append(sentence)
                 target_lst.append(round_scores(X_train['returnsOpenNextMktres10'].iloc[row]))
             
     # return dataframe
-    return pd.DataFrame({'headline':pd.Series(headlines_lst), 'returnsOpenNextMktres10':pd.Series(target_lst)})
+    return pd.DataFrame({col:pd.Series(headlines_lst), 'returnsOpenNextMktres10':pd.Series(target_lst)})
     
 def get_headline(headlines_df):
     
@@ -386,7 +490,7 @@ def get_headline(headlines_df):
     headlines_lst = []
     for row in range(0,len(headlines_df.index)):
         if headlines_df.iloc[row] != 'null':
-            headlines_lst.append(headlines_df.iloc[row])
+            headlines_lst.append(clean_headlines(headlines_df.iloc[row]))
 
     # split headlines to separate words
     basicvectorizer = CountVectorizer()
@@ -407,7 +511,8 @@ def headline_mapping(target, headlines_vectored, headline_vectorizer):
     coeff_df = pd.DataFrame({'Word' : basicwords, 
                             'Coefficient' : basiccoeffs})
     
-    # dont forget to remove null key
+    # remove stopwords from the dataframe (wait do headlines even have stopwords to begin with?)
+    #coeff_df = coeff_df[coeff_df.Word.isin(stopwords.words('english'))]
     
     # convert dataframe to dictionary of coefficients
     coefficient_dict = dict(zip(coeff_df.Word, coeff_df.Coefficient))
@@ -415,7 +520,7 @@ def headline_mapping(target, headlines_vectored, headline_vectorizer):
     return coefficient_dict, coeff_df['Coefficient'].mean()
 
 # for predictions
-def get_coeff_col(X, coeff_dict, coeff_default):
+def get_coeff_col(X, coeff_dict, coeff_default, col='headline'):
     
     def get_coeff(word_lst):
         
@@ -435,93 +540,41 @@ def get_coeff_col(X, coeff_dict, coeff_default):
     
     # loop through every item
     headlines_coeff_lst = []
-    for row in range(0,len(X['headline'].index)):
+    for row in range(0,len(X[col].index)):
         coeff_score = 0
-        if X['headline'].iloc[row] == 'null':
+        if X[col].iloc[row] == 'null':
             headlines_coeff_lst.append(np.nan)
-            break
-        for i in range(0,len(X['headline'].iloc[row])):
-            coeff_score += get_coeff(clean_headlines(str(X['headline'].iloc[row][i])).split(' '))
-        headlines_coeff_lst.append(coeff_score / len(X['headline'].iloc[row]))
+        else:
+            for i in range(0,len(X[col].iloc[row])):
+                curr_str_lst = list(filter(None,clean_headlines(str(X[col].iloc[row][i])).split(' ')))
+                coeff_score += get_coeff(curr_str_lst) / len(curr_str_lst) # get averages here (only applies to headlines)
+        headlines_coeff_lst.append(coeff_score)
         
     # merge coefficient frame with main
-    coeff_mean_df = pd.DataFrame({'headline_coeff_mean': pd.Series(headlines_coeff_lst)})
-    X = pd.concat([X.reset_index(), coeff_mean_df], axis=1)
+    X = X.reset_index()
+    X[col + '_coeff_sum'] = pd.Series(headlines_coeff_lst)
     
     return X
 
 
 # In[ ]:
 
-headline_df = get_headline_df(X_train)
-coefficient_dict, coefficient_default = headline_mapping(headline_df['returnsOpenNextMktres10'],
-                                            *get_headline(headline_df['headline']))
+get_ipython().run_cell_magic(u'time', u'', u"headline_df = get_headline_df(X_train.copy())\ncoefficient_dict, coefficient_default = headline_mapping(headline_df['returnsOpenNextMktres10'],\n                                            *get_headline(headline_df['headline']))")
 
 
 # In[ ]:
 
-# will be applied to X_test as well
-X_train = get_coeff_col(X_train, coefficient_dict, coefficient_default)
-
-
-# ### News Groupby Features
-# We are going to be looking specifically at the ``audiences`` and ``subjects`` column from the news dataframe. Here are some ideas:
-# * Get the number of times a certain subject/audience occurs, and get the sum of the list of audiences/subjects.
-
-# In[ ]:
-
-# this is set up for list of strings columns
-def get_feature_count(X_feat):
-    
-    # get list
-    item_lst = []
-    for row in range(0,len(X_feat.index)):
-        if X_feat.iloc[row] != 'null':
-            for i in range(0, len(X_feat.iloc[row])):
-                item_lst.append(X_feat.iloc[row][i])
-    
-    # get unique items
-    unique_feats = set(item_lst)
-    
-    # get frequency dictionary
-    item_map = {}
-    for i in unique_feats:
-        item_map[i] = len([n for n in item_lst if n == i])
-    
-    return item_map
-
-def get_feature_count_total(X_feat, item_map):
-    
-    # iter through every item and get total count
-    counts = []
-    for row in range(0,len(X_feat.index)):
-        count = 0
-        if X_feat.iloc[row] != 'null':
-            for i in range(0, len(X_feat.iloc[row])): # this is what is causing the error.
-                count += item_map[X_feat.iloc[row][i]]
-        counts.append(count)
-            
-    return pd.Series(counts)
-    
-def news_grouping_features(X):
-    
-    # account for all possible nulls
-    X[['audiences', 'subjects']] = X[['audiences', 'subjects']].fillna('null')
-    
-    # get map
-    audience_map = get_feature_count(X['audiences'])
-    subjects_map = get_feature_count(X['subjects'])
-    
-    # get count of each item
-    X['audiences_count'] = get_feature_count_total(X['audiences'], get_feature_count(X['audiences']))
-    X['subjects_count'] = get_feature_count_total(X['subjects'], get_feature_count(X['subjects']))
-    
-    return X
+get_ipython().run_cell_magic(u'time', u'', u'# will be applied to X_test as well\nX_train = get_coeff_col(X_train, coefficient_dict, coefficient_default)')
 
 
 # In[ ]:
 
-X_train = news_grouping_features(X_train)
+X_train[['headline', 'headline_coeff_sum']].head()
+
+
+# In[ ]:
+
+X_train[X_train.headline_coeff_sum.isnull() == False]
 
 
 # ### Clustering
@@ -557,90 +610,24 @@ def clustering(df):
 X_train = clustering(X_train)
 
 
-# ### Extra Features
-# 
-# Here are some basic extra features from other notebooks.
-
-# In[ ]:
-
-def extra_features(df):
-    
-    # Adding daily difference
-    new_col = df["close"] - df["open"]
-    df.insert(loc=6, column="daily_diff", value=new_col)
-    df['close_to_open'] =  np.abs(df['close'] / df['open'])
-    
-    return df
-
-
-# In[ ]:
-
-X_train = extra_features(X_train)
-
-
-# ### Get Time Features
-# 
-# This section splits the timestamp column into their own separate columns, as well as other various time features.
-# 
-# Possible idea: Encoding time?
-
-# In[ ]:
-
-# ripped from my previous kernel, NYC Taxi Fare
-
-# first get dates
-def split_time(df):
-    
-    # split date_time into categories
-    df['time_day'] = df['time'].str.slice(8,10)
-    df['time_month'] = df['time'].str.slice(5,7)
-    df['time_year'] = df['time'].str.slice(0,4)
-#     df['time_hour'] = df['time'].str.slice(11,13)
-#     df['time_minute'] = df['time'].str.slice(14,16)
-    
-    # source: https://www.kaggle.com/nicapotato/taxi-rides-time-analysis-and-oof-lgbm
-    df['temp_time'] = df['time'].str.replace(" UTC", "")
-    df['temp_time'] = pd.to_datetime(df['temp_time'], format='%Y-%m-%d %H')
-    
-    df['time_day_of_year'] = df.temp_time.dt.dayofyear
-    df['time_week_of_year'] = df.temp_time.dt.weekofyear
-    df["time_weekday"] = df.temp_time.dt.weekday
-    df["time_quarter"] = df.temp_time.dt.quarter
-    
-    del df['temp_time']
-    gc.collect()
-    
-    # convert to non-object columns
-    time_feats = ['time_day', 'time_month', 'time_year']
-    df[time_feats] = df[time_feats].apply(pd.to_numeric)
-    
-    # determine whether the day is set on a holiday
-    cal = USFederalHolidayCalendar()
-    holidays = cal.holidays(start='2007-01-01', end='2018-09-27').to_pydatetime()
-    df['on_holiday'] = df['time'].str.slice(0,10).apply(lambda x: 1 if x in holidays else 0)
-    
-    return df
-
-
-# In[ ]:
-
-X_train = split_time(X_train)
-
-
-# Here we remove all the excess columns and use label encoding on the assetName column.
+# ### Cleaning Data
+# Here we remove all the excess columns, and encode specific categorical features in preparation of training.
 
 # In[ ]:
 
 def misc_adjustments(X):
-    del_cols = ['index'] + [f for f in X.columns if X[f].dtype == 'object'] #and f != 'assetName']
+    
+    # remove list-based columns
+    del_cols = ['headline', 'assetCode']
     for f in del_cols:
         del X[f]
         
-    # encode data
+    # get categorical features
+    cols_categorical = ['assetName', 'time']
+        
+    # encode remaining categorical features
     le = LabelEncoder()
-#     X = X.assign(assetCode = le.fit_transform(X.assetCode),
-#                 assetName = le.fit_transform(X.assetName))
-    X = X.assign(assetName = le.fit_transform(X.assetName))
+    X[cols_categorical] = X[cols_categorical].apply(LabelEncoder().fit_transform)
     
     return X
 
@@ -659,122 +646,92 @@ X_train = misc_adjustments(X_train)
 def get_X(market_df, news_df):
     
     # these are all the functions applied to X_train except for a few
+    news_df = clean_news(news_df)
     market_df = mean_volume(market_df)
+    market_df = market_quant_feats(market_df)
     X_test = join_market_news(market_df, news_df, nulls=True)
     X_test = get_coeff_col(X_test, coefficient_dict, coefficient_default)
-    X_test = news_grouping_features(X_test)
     X_test = clustering(X_test)
-    X_test = extra_features(X_test)
-    X_test = split_time(X_test)
     X_test = misc_adjustments(X_test)
     
     return X_test
 
 
-# #### Resulting Dataframe and Data Correlation to Target column
-# We have went to roughly 50 columns to 135!
+# #### Resulting Dataframe 
+# 
 
 # In[ ]:
 
 X_train.head(10)
 
 
-# ### Using LightGBM for Modelling
-# 
-# We are going to use parameters from a notebook for modelling our data, as well as looping through the data until we reach a certain score.  Using the hyperparameters from (https://www.kaggle.com/kazuokiriyama/tuning-hyper-params-in-lgbm-achieve-0-66-in-lb)
-# 
-# Notes: 
-# * Might possibly add bayesian optimization if necessary?
-# * Using Neural Networks?
-# * Remove unimportant features via modelling.
+# In[ ]:
+
+X_train.shape
+
+
+# ### Using LGBM For Modelling
+# What could go wrong?
 
 # In[ ]:
 
-def set_data(X_train):
+def fixed_train_test_split(X, y, train_size):
+    
+    # round train size
+    train_size = int(train_size * len(X))
+    
+    # split data
+    X_train, y_train = X[train_size:], y[train_size:]
+    X_valid, y_valid = X[:train_size], y[:train_size]
+    
+    return X_train, y_train, X_valid, y_valid
 
+def set_data(X_train):
+    
     # get X and Y
     y_train = X_train['returnsOpenNextMktres10']
     del X_train['returnsOpenNextMktres10'], X_train['universe']
     
     # split data (for cross validation)
-    x1, x2, y1, y2 = train_test_split(X_train, 
-                                      y_train, 
-                                      test_size=0.25, 
-                                      random_state=99)
+    x1, y1, x2, y2 = fixed_train_test_split(X_train, 
+                                              y_train, 
+                                              0.8)
     
-    # get columns
-    train_cols = X_train.columns.tolist()
-#     categorical_cols = ['assetName']
-    
-    # convert to LGBM Data Structures
-    dtrain = lgb.Dataset(x1.values, y1, feature_name=train_cols) #categorical_feature=categorical_cols)
-    dvalid = lgb.Dataset(x2.values, y2, feature_name=train_cols) #categorical_feature=categorical_cols)
+    # set lgbm dataframes
+    dtrain = lgb.Dataset(x1, label=y1)
+    dvalid = lgb.Dataset(x2, label=y2)
     
     return dtrain, dvalid
-
-# https://www.kaggle.com/kazuokiriyama/tuning-hyper-params-in-lgbm-achieve-0-66-in-lb
-def lgbm_training(dtrain, dvalid):
     
-    # hyperparameters
-    x_1 = [0.19000424246380565, 2452, 212, 328, 202]
-    x_2 = [0.19016805202090095, 2583, 213, 312, 220]
+def lgbm_training(X_train):
     
-    # Set up the LightGBM params
-    params_1 = {
-        'task': 'train',
-        'boosting_type': 'dart',
-        'objective': 'binary',
-        'learning_rate': x_1[0],
-        'num_leaves': x_1[1],
-        'min_data_in_leaf': x_1[2],
-        'num_iteration': x_1[3],
-        'max_bin': x_1[4],
-        'verbose': 1
-    }
-
-    params_2 = {
-            'task': 'train',
-            'boosting_type': 'dart',
-            'objective': 'binary',
-            'learning_rate': x_2[0],
-            'num_leaves': x_2[1],
-            'min_data_in_leaf': x_2[2],
-            'num_iteration': x_2[3],
-            'max_bin': x_2[4],
-            'verbose': 1
-        }
+    # set model and parameters
+    params = {'learning_rate': 0.02, 
+              'boosting': 'gbdt', 
+              'objective': 'regression_l1', 
+              'seed': 573,
+            'sub_feature': 0.7,
+            'num_leaves': 60,
+            'min_data': 100,
+            'verbose': -1}
+    
+    # get x and y values
+    dtrain, dvalid = set_data(X_train)
     
     # train data
-    gbm_1 = lgb.train(params_1,
-        dtrain,
-        num_boost_round=100,
-        valid_sets=(dvalid,),
-        early_stopping_rounds=5)
-        
-    gbm_2 = lgb.train(params_2,
-            dtrain,
-            num_boost_round=1000,
-            valid_sets=(dvalid,),
-            early_stopping_rounds=5)
-        
-    return gbm_1, gbm_2
+    lgb_model = lgb.train(params, 
+                            dtrain, 
+                            1000, 
+                            valid_sets=(dvalid,), 
+                            verbose_eval=25, 
+                            early_stopping_rounds=100)
+    
+    return lgb_model
 
 
 # In[ ]:
 
-gbm_1, gbm_2 = lgbm_training(*set_data(X_train.copy()))
-
-
-# In[ ]:
-
-def predict_w_gbm(X_test):
-    
-    # get predictions
-    pred_1 = gbm_1.predict(X_test)
-    pred_2 = gbm_2.predict(X_test)
-    
-    # return mean
-    return np.clip((pred_1 + pred_2) / 2, -1, 1)
+lgb_model = lgbm_training(X_train.copy())
 
 
 # ### Making Predictions
@@ -783,7 +740,7 @@ def predict_w_gbm(X_test):
 
 # In[ ]:
 
-get_ipython().run_cell_magic(u'time', u'', u"\ndef make_predictions(market_obs_df, news_obs_df):\n    \n    # predict using given model\n    X_test = get_X(market_obs_df, news_obs_df)\n    prediction_values = predict_w_gbm(X_test)\n\n    return prediction_values\n\nfor (market_obs_df, news_obs_df, predictions_template_df) in env.get_prediction_days(): # Looping over days from start of 2017 to 2019-07-15\n    \n    # make predictions\n    predictions_template_df['confidenceValue'] = make_predictions(market_obs_df, news_obs_df)\n    \n    # save predictions\n    env.predict(predictions_template_df)")
+get_ipython().run_cell_magic(u'time', u'', u"\ndef make_predictions(market_obs_df, news_obs_df):\n    \n    # predict using given model\n    X_test = get_X(market_obs_df, news_obs_df)\n    prediction_values = np.clip(lgb_model.predict(X_test), -1, 1)\n\n    return prediction_values\n\nfor (market_obs_df, news_obs_df, predictions_template_df) in env.get_prediction_days(): # Looping over days from start of 2017 to 2019-07-15\n    \n    # make predictions\n    predictions_template_df['confidenceValue'] = make_predictions(market_obs_df, news_obs_df)\n    \n    # save predictions\n    env.predict(predictions_template_df)")
 
 
 # ### Export Submission
@@ -792,7 +749,6 @@ get_ipython().run_cell_magic(u'time', u'', u"\ndef make_predictions(market_obs_d
 
 # exports csv
 env.write_submission_file()
-print('finished!')
 
 
 # ### References:
@@ -803,4 +759,6 @@ print('finished!')
 # * [Feature engineering - Andrew Lukyanenko](https://www.kaggle.com/artgor/eda-feature-engineering-and-everything)
 # * [Basic Text Processing - akatsuki06](https://www.kaggle.com/akatsuki06/basic-text-processing-cleaning-the-description)
 # * [The fallacy of encoding assetCode - marketneutral](https://www.kaggle.com/marketneutral/the-fallacy-of-encoding-assetcode)
-# * [Hyperparameters - kazuokiriyama](https://www.kaggle.com/kazuokiriyama/tuning-hyper-params-in-lgbm-achieve-0-66-in-lb)
+# * [Market Data NN Baseline  - dieter](https://www.kaggle.com/christofhenkel/market-data-nn-baseline)
+# * [Aantonova Features - aantonova](https://www.kaggle.com/aantonova/797-lgbm-and-bayesian-optimization/notebook)
+# * [Simple quant features using python - YouHan Lee](https://www.kaggle.com/youhanlee/simple-quant-features-using-python)
