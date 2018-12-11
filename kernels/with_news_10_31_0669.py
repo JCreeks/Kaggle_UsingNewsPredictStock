@@ -55,16 +55,15 @@ warnings.filterwarnings(action ='ignore',category = DeprecationWarning)
 #聚合每一个日期前三天内的新闻数据，影响股价走势
 #之前的版本，直接复制几份，然后和market_train进行join，代价较大
 #直接进行news data的join
-def get_news_train(raw_data,days = 5):
+def get_news_train(raw_data,days = 6):
     news_last = pd.DataFrame()
     #衰减系数
     rate = 1.0
     for i in range(days):
         cur_train = raw_data[cols] * rate 
-        rate *= 0.7
+        rate *= 0.9
         cur_train['time'] = raw_data['time'] + datetime.timedelta(days = i,hours=22)
         cur_train['key'] = cur_train['time'].astype(str)+ raw_data['assetName'].astype(str)
-        #cur_train的groupby是被迫的操作，处理new_train，6天之内的，内存不足，下面的groupby
         cur_train = cur_train[['key'] + cols].groupby('key').sum()
         cur_train['key'] = cur_train.index.values
         news_last = pd.concat([news_last, cur_train[['key'] + cols]])
@@ -110,9 +109,7 @@ cat_cols = ['assetCode','assetName']
 num_cols = ['volume', 'close', 'open', 'returnsClosePrevRaw1', 'returnsOpenPrevRaw1', 'returnsClosePrevMktres1',
                     'returnsOpenPrevMktres1', 'returnsClosePrevRaw10', 'returnsOpenPrevRaw10', 'returnsClosePrevMktres10',
                     'returnsOpenPrevMktres10','sentimentNegative','sentimentNeutral','sentimentPositive','relevance','companyCount','bodySize',
-            'sentenceCount','wordCount','firstMentionSentence', 'sentimentWordCount','takeSequence','sentimentClass','noveltyCount12H', 
-            'noveltyCount24H','noveltyCount3D', 'noveltyCount5D', 'noveltyCount7D', 'volumeCounts12H','volumeCounts24H', 'volumeCounts3D',
-            'volumeCounts5D','volumeCounts7D']
+            'sentenceCount','wordCount','firstMentionSentence']
 
 
 # In[ ]:
@@ -211,79 +208,34 @@ from functools import partial
 from hyperopt import hp, fmin, tpe
 from sklearn.metrics import mean_squared_error
 algo = partial(tpe.suggest, n_startup_jobs=10)
-# def auto_turing(args):
-#     #model = XGBClassifier(n_jobs = 4, n_estimators = args['n_estimators'],max_depth=6)
-#     model = lgb.LGBMClassifier(n_estimators=args['n_estimators'])
-#     model.fit(X_train,y_train.astype(int))
-#     confidence_valid = model.predict(X_valid)*2 -1
-#     score = accuracy_score(confidence_valid>0,y_valid)
-#     print(args,score)
-#     return -score
+def auto_turing(args):
+    #model = XGBClassifier(n_jobs = 4, n_estimators = args['n_estimators'],max_depth=6)
+    model = lgb.LGBMClassifier(n_estimators=args['n_estimators'])
+    model.fit(X_train,y_train.astype(int))
+    confidence_valid = model.predict(X_valid)*2 -1
+    score = accuracy_score(confidence_valid>0,y_valid)
+    print(args,score)
+    return -score
 # space = {"n_estimators":hp.choice("n_estimators",range(20,200))}
 # print(fmin)
 # best = fmin(auto_turing, space, algo=algo,max_evals=30)
 # print(best)
 
 # 单机xgb程序
-# model = XGBClassifier(n_jobs = 4, n_estimators = 80, max_depth=6, subsample = 0.66,colsample_bytree = 0.66,learning_rate = 0.1)
-# model.fit(X_train,y_train.astype(int))
-# confidence_valid = model.predict(X_valid)*2 -1
-# score = accuracy_score(confidence_valid>0,y_valid)
-# print(score)
-# print("MSE")
-# print(mean_squared_error(confidence_valid > 0, y_valid.astype(float)))
-# 单机lgb程序,训练比xgb快
+model = XGBClassifier(n_jobs = 4, n_estimators = 50, max_depth=6)
+model.fit(X_train,y_train.astype(int))
+confidence_valid = model.predict(X_valid)*2 -1
+score = accuracy_score(confidence_valid>0,y_valid)
+print(score)
+print("MSE")
+print(mean_squared_error(confidence_valid > 0, y_valid.astype(float)))
+# 单机lgb程序
 # import lightgbm as lgb
-# model = lgb.LGBMClassifier(num_threads = 4, n_estimators=100, feature_fraction = 0.66, bagging_fraction = 0.66,
-#                            early_stopping_rounds = 10,valid_sets = [X_valid, y_valid.astype(int)],objective = 'binary', metric='binary_logloss')
+# model = lgb.LGBMClassifier(n_estimators=70)
 # model.fit(X_train,y_train.astype(int))
 # confidence_valid = model.predict(X_valid)*2 -1
 # score = accuracy_score(confidence_valid>0,y_valid)
 # print(score)
-# print("MSE",mean_squared_error(confidence_valid > 0, y_valid.astype(float)))
-# custom function to run light gbm model
-def run_lgb(train_X, train_y, val_X, val_y,args):
-    params = {
-        "objective" : "binary",
-        "metric" : "binary_logloss", 
-        "num_leaves" : args['num_leaves'],
-        "min_child_samples" : args['min_child_samples'],
-        "learning_rate" : args['learning_rate'],
-        "bagging_fraction" : 0.7,
-        "feature_fraction" : 0.66,
-        "bagging_frequency" : 5,
-        "bagging_seed" : 2018,
-        "verbosity" : -1
-    }
-    
-    lgtrain = lgb.Dataset(train_X, label=train_y)
-    lgval = lgb.Dataset(val_X, label=val_y)
-    model = lgb.train(params, lgtrain, args['n_estimators'], valid_sets=[lgval], early_stopping_rounds=50, verbose_eval=100)
-    
-#     pred_test_y = model.predict(test_X, num_iteration=model.best_iteration)
-    pred_val_y = model.predict(val_X, num_iteration=model.best_iteration)
-    confidence_valid = model.predict(X_valid)*2 -1
-    score = accuracy_score(confidence_valid > 0 , y_valid)
-    print(score)
-    mse = mean_squared_error(confidence_valid > 0, y_valid.astype(float))
-    print("MSE", mse)
-    print("args",args)
-    return model, mse
-
-# def auto_turing(args):
-#     model, mse = run_lgb(X_train, y_train.astype(int), X_valid, y_valid.astype(int),args)
-#     return mse
-# space = {"n_estimators":hp.choice('n_estimators',range(100,1000)),
-#          "num_leaves":hp.choice('num_leaves',range(20,100)),
-#          "min_child_samples":hp.choice("min_child_samples",range(20,2000)),
-#          'learning_rate':hp.loguniform('learning_rate',0.01,0.3),
-#          'max_depth': hp.choice('max_depth', range(3,8))
-#         }
-# print(fmin)
-# best = fmin(auto_turing, space, algo=algo,max_evals=100)
-# print(best)
-args = {'learning_rate': 1.0958730495793214, 'max_depth': 7, 'min_child_samples': 301, 'n_estimators': 439, 'num_leaves': 43}
-model, _ = run_lgb(X_train, y_train.astype(int), X_valid, y_valid.astype(int), args)
 
 # from sklearn.ensemble import RandomForestClassifier
 # distribution of confidence that will be used as submission
@@ -291,7 +243,6 @@ model, _ = run_lgb(X_train, y_train.astype(int), X_valid, y_valid.astype(int), a
 # plt.title("predicted confidence")
 # plt.show()
 # these are tuned params I found
-gc.collect()
  
 
 
@@ -300,7 +251,6 @@ gc.collect()
 # In[ ]:
 
 # calculation of actual metric that is used to calculate final score
-confidence_valid = model.predict(X_valid)*2 -1
 r_valid = r_valid.clip(-1,1) # get rid of outliers. Where do they come from??
 x_t_i = confidence_valid * r_valid * u_valid
 data = {'day' : d_valid, 'x_t_i' : x_t_i}
